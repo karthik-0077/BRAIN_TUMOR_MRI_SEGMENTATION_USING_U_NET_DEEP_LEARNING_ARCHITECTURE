@@ -1,120 +1,588 @@
-# Brain Tumor MRI Segmentation — Attention U-Net
+# Brain Tumor MRI Segmentation Using Deep Learning
 
-Pixel-level segmentation of brain tumors (low-grade glioma) from MRI slices, using an **Attention U-Net** as the primary model and a **lightweight DeepLabV3-style ASPP network** as a comparison baseline. Both are trained and evaluated on the same data and metrics so their results are directly comparable.
+![Python](https://img.shields.io/badge/Python-3.x-blue)
+![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-orange)
+![Task](https://img.shields.io/badge/Task-Medical%20Image%20Segmentation-green)
+![Models](https://img.shields.io/badge/Models-Attention%20U--Net%20%7C%20DeepLabV3--like-purple)
 
-Given an MRI slice, the model outputs a binary mask of the tumor region — not just "tumor present," but exactly *where*.
+This project uses deep learning to automatically segment brain tumors from MRI images. It implements and evaluates two semantic-segmentation models:
+
+- **Attention U-Net**
+- **Lightweight DeepLabV3-like model**
+
+The Attention U-Net achieved the strongest performance, reaching an **overall Dice score of 0.8562** and an **overall IoU of 0.7486** on the test set.
+
+---
 
 ## Table of Contents
+
+- [Project Overview](#project-overview)
+- [Main Features](#main-features)
 - [Dataset](#dataset)
-- [Approach](#approach)
-- [Architectures](#architectures)
+- [Data Preprocessing](#data-preprocessing)
+- [Model Architectures](#model-architectures)
+- [Loss Function and Metrics](#loss-function-and-metrics)
+- [Experimental Setup](#experimental-setup)
 - [Results](#results)
-- [Project Structure](#project-structure)
-- [Setup](#setup)
-- [Usage](#usage)
-- [Known Issues](#known-issues)
-- [License](#license)
+- [Installation](#installation)
+- [How to Run the Project](#how-to-run-the-project)
+- [Generated Outputs](#generated-outputs)
+- [Recommended Repository Structure](#recommended-repository-structure)
+- [Limitations](#limitations)
+- [Future Improvements](#future-improvements)
+- [Medical Disclaimer](#medical-disclaimer)
+
+---
+
+## Project Overview
+
+Brain tumor segmentation is the process of identifying the exact tumor region in a brain MRI scan. Manual segmentation can be time-consuming and may vary between specialists.
+
+This project builds a binary segmentation system that receives an MRI image and produces a mask containing:
+
+- `0` for background pixels
+- `1` for tumor pixels
+
+The complete workflow includes:
+
+1. Pairing MRI images with their corresponding tumor masks.
+2. Resizing and normalizing images.
+3. Creating stratified training, validation, and test sets.
+4. Applying image augmentation.
+5. Training an Attention U-Net.
+6. Fine-tuning the best Attention U-Net checkpoint.
+7. Training a lightweight DeepLabV3-like comparison model.
+8. Evaluating both models using Dice, IoU, precision, recall, F1-score, and pixel accuracy.
+9. Saving models, metrics, training curves, confusion matrices, and sample predictions.
+
+---
+
+## Main Features
+
+- Automatic image-and-mask pairing using `_mask.tif` filenames.
+- MRI images resized to `256 × 256`.
+- Binary mask preservation using nearest-neighbor interpolation.
+- Stratified train, validation, and test splitting.
+- Training-set balancing based on tumor-positive and empty-mask slices.
+- On-the-fly data augmentation with TensorFlow.
+- Attention gates in U-Net skip connections.
+- Batch normalization, spatial dropout, and L2 regularization.
+- Combined Binary Cross-Entropy and Focal Tversky loss.
+- AdamW optimization with cosine learning-rate decay.
+- Fine-tuning from the best saved Attention U-Net checkpoint.
+- Comparison with a lightweight DeepLabV3-like architecture.
+- Automatic checkpointing and early stopping.
+- Pixel-level confusion matrix and classification report.
+- Visualization of ground truth masks, predictions, and MRI overlays.
+
+---
 
 ## Dataset
 
-[LGG MRI Segmentation dataset](https://www.kaggle.com/datasets/mateuszbuda/lgg-mri-segmentation) (Kaggle, `kaggle_3m`), originally from The Cancer Genome Atlas (TCGA) low-grade glioma collection. Each MRI slice (`.tif`) is paired with a binary tumor mask (`<image>_mask.tif`). The dataset is **not included** in this repo — download it from Kaggle and update the `dataset_path` variable in the notebook.
+The notebook expects a brain MRI segmentation dataset stored inside a folder named `kaggle_3m`.
 
-## Approach
+It found:
 
-1. **Pairing & splitting** — images are matched to masks, labeled tumor-positive/negative, and split 64/16/20 (train/val/test) with stratification so all splits reflect the same tumor-presence ratio.
-2. **Class imbalance handling** — brain MRI tumor segmentation is a heavily imbalanced problem (most slices are tumor-free, and tumor pixels are ~1–2% of a positive slice). This is addressed at two levels:
-   - **Slice-level**: every tumor-positive training slice is kept; tumor-negative slices are downsampled to a 2:1 negative:positive ratio.
-   - **Loss-level**: a Focal Tversky loss weights false negatives more heavily than false positives, so missing real tumor pixels is penalized harder than over-predicting.
-3. **Augmentation** — random horizontal/vertical flips and 90° rotations (applied identically to image and mask to keep them aligned), plus brightness/contrast jitter (image only).
-4. **Loss function** — `combo_loss = 0.5 * BCE + 0.5 * Focal Tversky` (α=0.3, β=0.7, γ=0.75), combining pixel-wise classification signal with an imbalance-aware region overlap metric.
-5. **Training** — `AdamW` with cosine-decay learning rate (1e-3 → 1e-5) for up to 100 epochs, early stopping on validation Dice, followed by a fine-tuning phase at a lower fixed learning rate (1e-4).
-6. **Evaluation** — Dice and IoU are reported both over all test images and over tumor-positive test images only (the latter is the clinically meaningful number, since including empty-mask slices inflates scores).
+- **3,929 paired MRI images and masks**
+- **2,514 training samples**
+- **629 validation samples**
+- **786 test samples**
+- **275 tumor-positive samples in the test set**
 
-## Architectures
+Each MRI image must have a matching mask using the following naming format:
 
-### Attention U-Net (primary model)
-A U-Net encoder/decoder (32→64→128→256→512 filters, with batch norm, ReLU, and spatial dropout) with **attention gates** on every skip connection. Each gate learns to weight the encoder's features by relevance to the decoder's current prediction, suppressing irrelevant background before it's merged into the decoder path — rather than passing the raw skip connection through unfiltered as in a standard U-Net.
+```text
+image_name.tif
+image_name_mask.tif
+```
 
-### DeepLabV3-like (comparison baseline)
-A lighter encoder/decoder network using an **ASPP (Atrous Spatial Pyramid Pooling)** block — parallel dilated convolutions at rates 1/2/4/6 — to capture multi-scale context before upsampling back to full resolution.
+An example dataset structure is:
+
+```text
+kaggle_3m/
+├── patient_folder_1/
+│   ├── image_1.tif
+│   ├── image_1_mask.tif
+│   ├── image_2.tif
+│   └── image_2_mask.tif
+├── patient_folder_2/
+│   ├── image_1.tif
+│   └── image_1_mask.tif
+└── ...
+```
+
+> The dataset itself is not included in this repository. Download it separately and update `dataset_path` in the notebook.
+
+---
+
+## Data Preprocessing
+
+### MRI Images
+
+Each MRI image is:
+
+1. Read with OpenCV.
+2. Converted from BGR to RGB.
+3. Resized to `256 × 256`.
+4. Normalized from the range `0–255` to `0–1`.
+5. Converted to `float32`.
+
+### Segmentation Masks
+
+Each mask is:
+
+1. Read in grayscale.
+2. Resized using nearest-neighbor interpolation.
+3. Converted into a binary mask.
+4. Expanded to the shape `(256, 256, 1)`.
+
+Nearest-neighbor interpolation is important for masks because it preserves the original class boundaries and avoids creating incorrect intermediate pixel values.
+
+### Dataset Split
+
+The dataset is divided using stratified splitting so that tumor-positive and tumor-negative MRI slices are represented across all subsets.
+
+```text
+Training:   2,514 images
+Validation:   629 images
+Testing:      786 images
+```
+
+The training-balancing logic keeps all tumor-positive images and limits tumor-negative images to a maximum ratio of approximately `2:1`.
+
+### Data Augmentation
+
+The training pipeline applies:
+
+- Random horizontal flipping
+- Random vertical flipping
+- Random rotations in multiples of 90 degrees
+- Random brightness adjustment
+- Random contrast adjustment
+
+Geometric transformations are applied to both the MRI image and its mask. Brightness and contrast changes are applied only to the MRI image.
+
+---
+
+## Model Architectures
+
+## 1. Attention U-Net
+
+The main model is an Attention U-Net with an encoder-decoder architecture.
+
+### Encoder
+
+The encoder uses convolution blocks with:
+
+- Two `3 × 3` convolution layers
+- Batch normalization
+- ReLU activation
+- Max pooling
+- L2 regularization
+- Spatial dropout in deeper layers
+
+The encoder filter sizes are:
+
+```text
+32 → 64 → 128 → 256
+```
+
+The bridge uses:
+
+```text
+512 filters
+```
+
+### Decoder
+
+The decoder uses:
+
+- Transposed convolution for upsampling
+- Attention gates on skip connections
+- Feature concatenation
+- Convolution blocks
+
+The decoder filter sizes are:
+
+```text
+256 → 128 → 64 → 32
+```
+
+The final layer uses a `1 × 1` convolution with sigmoid activation to create a binary segmentation probability map.
+
+### Attention Gates
+
+Attention gates help the model focus on useful tumor-related features from encoder skip connections while reducing irrelevant background information.
+
+---
+
+## 2. Lightweight DeepLabV3-like Model
+
+A lightweight DeepLabV3-like model is included for comparison.
+
+It contains:
+
+- A convolutional encoder
+- Three max-pooling stages
+- An Atrous Spatial Pyramid Pooling-style block
+- Dilated convolutions with rates `1`, `2`, `4`, and `6`
+- Bilinear upsampling
+- A sigmoid segmentation output
+
+The model has approximately:
+
+```text
+718,001 total parameters
+```
+
+---
+
+## Loss Function and Metrics
+
+### Combined Loss
+
+The project uses a custom loss function:
+
+```text
+Combined Loss = 0.5 × Binary Cross-Entropy
+              + 0.5 × Focal Tversky Loss
+```
+
+Focal Tversky loss helps handle severe class imbalance because tumor pixels occupy only a small portion of most MRI images.
+
+The loss uses:
+
+```text
+alpha = 0.3
+beta  = 0.7
+gamma = 0.75
+```
+
+A larger `beta` gives a higher penalty to false negatives, encouraging the model to avoid missing tumor pixels.
+
+### Evaluation Metrics
+
+The following metrics are calculated:
+
+- Pixel accuracy
+- Dice coefficient
+- Intersection over Union
+- Precision
+- Recall
+- F1-score
+- Confusion matrix
+
+Dice and IoU are more informative than accuracy for this project because the background class contains far more pixels than the tumor class.
+
+---
+
+## Experimental Setup
+
+### General Configuration
+
+```text
+Image size:       256 × 256
+Batch size:       16
+Prediction limit: 0.5
+Random seed:      42
+```
+
+### Attention U-Net Training
+
+```text
+Optimizer:             AdamW
+Initial learning rate: 1e-3
+Minimum learning rate: 1e-5
+Weight decay:          1e-5
+Maximum epochs:        100
+Early-stopping patience: 15
+```
+
+A cosine-decay learning-rate schedule is used during the initial training stage.
+
+### Attention U-Net Fine-Tuning
+
+```text
+Optimizer:             AdamW
+Learning rate:         1e-4
+Weight decay:          1e-5
+Maximum epochs:        40
+Early-stopping patience: 25
+```
+
+### DeepLabV3-like Training
+
+```text
+Optimizer:             Adam
+Learning rate:         1e-5
+Maximum epochs:        60
+Early-stopping patience: 12
+```
+
+`ReduceLROnPlateau` is used to reduce the learning rate when validation loss stops improving.
+
+---
 
 ## Results
 
-Final metrics are computed on the held-out test set, both overall and restricted to tumor-positive slices. Fill in after running the full notebook (values are saved to `final_practical_model_comparison_table.csv`):
+### Final Model Comparison
 
-| Model            | Status                  | Test Accuracy | Overall Dice | Overall IoU | Tumor-positive Dice | Tumor-positive IoU | Precision | Recall | F1 |
-|------------------|--------------------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Attention U-Net  | Implemented and trained | | | | | | | | |
-| DeepLabV3-like   | Implemented and trained | | | | | | | | |
+| Model | Test Accuracy | Overall Dice | Overall IoU | Tumor-positive Dice | Tumor-positive IoU | Precision | Recall | F1-score |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Attention U-Net** | **0.9971** | **0.8562** | **0.7486** | **0.8655** | **0.7629** | **0.8410** | 0.8721 | **0.8562** |
+| DeepLabV3-like | 0.9953 | 0.7993 | 0.6656 | 0.8180 | 0.6921 | 0.7003 | **0.9307** | 0.7993 |
 
-Sample prediction grids (original MRI / ground-truth mask / predicted mask / overlay) are saved for the best-scoring tumor-positive test slices under `final_attention_unet_test_predictions/` and `deeplabv3_like_test_predictions/`.
+### Best Model
 
-## Project Structure
+The **Attention U-Net** produced the best overall segmentation results.
 
-```
-.
-├── Brain_Tumor_MRI_Segmentation_Using_U_Net_Deep_Learning_Architecture.ipynb
-├── README.md
-├── requirements.txt
-├── LICENSE
-└── results/                     # created at runtime
-    ├── best_attention_unet.keras
-    ├── best_deeplabv3_like.keras
-    ├── attention_unet_history.csv
-    ├── deeplabv3_like_training_history.csv
-    ├── final_practical_model_comparison_table.csv
-    ├── final_attention_unet_test_predictions/
-    └── deeplabv3_like_test_predictions/
+It achieved:
+
+```text
+Test Accuracy:       0.9971
+Overall Dice:        0.8562
+Overall IoU:         0.7486
+Tumor-positive Dice: 0.8655
+Tumor-positive IoU:  0.7629
+Precision:           0.8410
+Recall:              0.8721
+F1-score:            0.8562
 ```
 
-## Setup
+### Attention U-Net Confusion Matrix
 
-**Windows (PowerShell or Command Prompt):**
+```text
+                    Predicted
+                 Background    Tumor
+Actual Background  50,912,057   84,818
+Actual Tumor            65,819  448,602
+```
 
-```bat
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+### Train, Validation, and Test Performance
+
+| Dataset | Accuracy | Dice | IoU | Precision | Recall | F1-score |
+|---|---:|---:|---:|---:|---:|---:|
+| Train | 0.9971 | 0.8633 | 0.7595 | 0.8417 | 0.8861 | 0.8633 |
+| Validation | 0.9969 | 0.8538 | 0.7448 | 0.8182 | 0.8926 | 0.8538 |
+| Test | 0.9971 | 0.8562 | 0.7486 | 0.8410 | 0.8721 | 0.8562 |
+
+The similar train, validation, and test scores suggest that the Attention U-Net generalizes reasonably well on this dataset.
+
+---
+
+## Installation
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/YOUR-USERNAME/YOUR-REPOSITORY-NAME.git
+cd YOUR-REPOSITORY-NAME
+```
+
+Replace `YOUR-USERNAME` and `YOUR-REPOSITORY-NAME` with your GitHub details.
+
+### 2. Create a Virtual Environment
+
+#### Windows
+
+```bash
 python -m venv venv
 venv\Scripts\activate
-pip install -r requirements.txt
 ```
 
-> If PowerShell blocks the activation script with an execution-policy error, run this once in PowerShell (as your normal user, not admin), then retry `venv\Scripts\activate`:
-> ```powershell
-> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-> ```
+#### macOS or Linux
 
-Download the [LGG MRI Segmentation dataset](https://www.kaggle.com/datasets/mateuszbuda/lgg-mri-segmentation) and place it locally, then update these two variables near the top of the notebook to match your paths (the notebook was originally written for Google Colab + Drive, so they currently point at `/content/drive/...`). On Windows, use either double backslashes or forward slashes in the path:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install the Required Libraries
+
+```bash
+pip install tensorflow opencv-python numpy pandas matplotlib scikit-learn jupyter
+```
+
+### Main Dependencies
+
+```text
+Python
+TensorFlow / Keras
+OpenCV
+NumPy
+Pandas
+Matplotlib
+Scikit-learn
+Jupyter Notebook or Google Colab
+```
+
+A GPU-enabled environment is recommended for model training.
+
+---
+
+## How to Run the Project
+
+### Option 1: Google Colab
+
+1. Upload the notebook to Google Colab.
+2. Upload the dataset to Google Drive.
+3. Mount Google Drive:
 
 ```python
-dataset_path = "C:/Users/<you>/Datasets/kaggle_3m"
-save_dir = "C:/Users/<you>/Datasets/results"
+from google.colab import drive
+drive.mount("/content/drive")
 ```
 
-## Usage
+4. Update the paths:
 
-Run the notebook top to bottom in Jupyter, JupyterLab, or Colab:
-
-```bat
-jupyter notebook Brain_Tumor_MRI_Segmentation_Using_U_Net_Deep_Learning_Architecture.ipynb
+```python
+dataset_path = "/content/drive/MyDrive/your_dataset_folder/kaggle_3m"
+save_dir = "/content/drive/MyDrive/brain_tumor_segmentation_results"
 ```
 
-It will:
-1. Load and pair images/masks, split into train/val/test.
-2. Build the `tf.data` pipeline with augmentation.
-3. Train the Attention U-Net, then fine-tune it.
-4. Evaluate on the test set (Dice, IoU, precision, recall, F1, confusion matrix) and save sample predictions.
-5. Build, train, and evaluate the DeepLabV3-like comparison model.
-6. Save a final side-by-side comparison table.
+5. Select a GPU runtime:
 
-A GPU is strongly recommended. On Windows, native GPU support for TensorFlow 2.10+ is Linux/WSL2-only — if you have an NVIDIA GPU and want to use it on Windows, either install TensorFlow inside **WSL2** (Windows Subsystem for Linux), or run the notebook on **Google Colab** instead (free GPU, no local setup). Without a GPU, training two 256×256 segmentation models on CPU will be very slow.
+```text
+Runtime → Change runtime type → GPU
+```
 
-## Known Issues
+6. Run the notebook cells in order.
 
-Fixed as of the current notebook version — the training-curve cell now builds `full_history` from `history.history` + `finetune_history.history` before plotting, and the duplicate/broken cells that referenced undefined variables have been removed.
+### Option 2: Local Jupyter Notebook
 
-## License
+1. Place the dataset inside the project directory.
+2. Change the notebook paths:
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+```python
+dataset_path = "data/kaggle_3m"
+save_dir = "results"
+```
 
-The LGG MRI Segmentation dataset has its own license/terms on Kaggle; review those separately before redistributing any data.
+3. Start Jupyter:
+
+```bash
+jupyter notebook
+```
+
+4. Open the project notebook.
+5. Run all cells in order.
+
+---
+
+## Generated Outputs
+
+The notebook creates and saves the following files:
+
+### Saved Models
+
+```text
+best_attention_unet.keras
+best_deeplabv3_like.keras
+last_deeplabv3_like.keras
+```
+
+### Training Logs
+
+```text
+attention_unet_history.csv
+attention_unet_finetune_history.csv
+deeplabv3_like_training_history.csv
+```
+
+### Metrics
+
+```text
+final_attention_unet_metrics.csv
+attention_unet_final_test_results.csv
+attention_unet_train_val_test_metrics.csv
+final_deeplabv3_like_metrics.csv
+final_practical_model_comparison_table.csv
+```
+
+### Visualizations
+
+```text
+attention_unet_loss_curve_smoothed.png
+attention_unet_dice_curve_smoothed.png
+attention_unet_confusion_matrix.png
+deeplabv3_like_loss_curve.png
+deeplabv3_like_dice_curve.png
+deeplabv3_like_iou_curve.png
+```
+
+### Prediction Examples
+
+The prediction figures show:
+
+1. Original MRI
+2. Ground-truth mask
+3. Predicted tumor mask
+4. Predicted mask overlaid on the MRI
+
+The best recorded Attention U-Net sample in the notebook reached a per-image Dice score of approximately `0.9813`.
+
+---
+
+## Recommended Repository Structure
+
+```text
+brain-tumor-mri-segmentation/
+├── README.md
+├── brain_tumor_mri_segmentation.ipynb
+├── requirements.txt
+├── results/
+│   ├── metrics/
+│   ├── plots/
+│   └── sample_predictions/
+└── data/
+    └── README.md
+```
+
+Do not upload the complete dataset or large trained model files unless their licenses allow redistribution and the files fit GitHub's storage limits.
+
+It is recommended to rename the notebook to:
+
+```text
+brain_tumor_mri_segmentation.ipynb
+```
+
+before uploading it to GitHub.
+
+---
+
+## Limitations
+
+- The dataset contains a strong class imbalance between background and tumor pixels.
+- Pixel accuracy can appear very high because most pixels belong to the background.
+- The current model performs binary segmentation only.
+- The project does not classify tumor type or grade.
+- The results come from one dataset split using a fixed random seed.
+- The notebook loads the full dataset into memory.
+- Patient-level data leakage should be checked if slices from the same patient can appear in different subsets.
+- The system has not been clinically validated.
+- MRI scans from other hospitals, scanners, or acquisition protocols may produce different results.
+
+---
+
+## Future Improvements
+
+Possible improvements include:
+
+- Patient-level train, validation, and test splitting.
+- K-fold cross-validation.
+- Mixed-precision training.
+- Patch-based training for larger MRI images.
+- Pretrained encoders such as EfficientNet or ResNet.
+- U-Net++, ResUNet, TransUNet, or transformer-based segmentation models.
+- Threshold optimization using the validation set.
+- Connected-component post-processing.
+- Data augmentation with elastic deformation.
+- Model explainability and uncertainty estimation.
+- Multi-class tumor-region segmentation.
+- Deployment through Streamlit, Flask, FastAPI, or TensorFlow Serving.
+
+---
+
+## Medical Disclaimer
+
+This project is intended for **educational and research purposes only**. It is not a certified medical device and must not be used as a replacement for diagnosis, treatment decisions, or evaluation by qualified healthcare professionals.
