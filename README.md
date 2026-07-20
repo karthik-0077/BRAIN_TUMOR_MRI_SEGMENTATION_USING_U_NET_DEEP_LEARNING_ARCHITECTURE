@@ -1,10 +1,5 @@
 # Brain Tumor MRI Segmentation Using Deep Learning
 
-![Python](https://img.shields.io/badge/Python-3.x-blue)
-![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-orange)
-![Task](https://img.shields.io/badge/Task-Medical%20Image%20Segmentation-green)
-![Models](https://img.shields.io/badge/Models-Attention%20U--Net%20%7C%20DeepLabV3--like-purple)
-
 This project uses deep learning to automatically segment brain tumors from MRI images. It implements and evaluates two semantic-segmentation models:
 
 - **Attention U-Net**
